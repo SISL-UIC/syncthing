@@ -253,7 +253,7 @@ jobs:
           }
 
       - name: Sign files with Trusted Signing
-        uses: azure/trusted-signing-action@0d74250c661747df006298d0fb49944c10f16e03 # v0.5.1
+        uses: SISL-UIC/artifact-signing-action@4c86a364366bb97913dc47b5ff15bb8fbc75c53e # v0.5.1
         with:
           azure-tenant-id: ${{ secrets.AZURE_TRUSTED_SIGNING_TENANT_ID }}
           azure-client-id: ${{ secrets.AZURE_TRUSTED_SIGNING_CLIENT_ID }}
