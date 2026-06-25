@@ -233,25 +233,8 @@ jobs:
 
   codesign-windows:
     name: Codesign for Windows
-    if: github.repository_owner == 'syncthing' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/release-nightly' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: windows-latest
-    needs:
-      - package-windows
     steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v7
-        with:
-          name: unsigned-packages-windows
-          path: packages
-
-      - name: Extract packages
-        working-directory: packages
-        run: |
-          $files = Get-ChildItem "." -Filter *.zip
-          foreach ($file in $files) {
-            7z x $file.Name
-          }
-
       - name: Sign files with Trusted Signing
         uses: SISL-UIC/artifact-signing-action@4c86a364366bb97913dc47b5ff15bb8fbc75c53e # v0.5.1
         with:
@@ -267,15 +250,6 @@ jobs:
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
-
-      - name: Repackage packages
-        working-directory: packages
-        run: |
-          $files = Get-ChildItem "." -Filter *.zip
-          foreach ($file in $files) {
-            Remove-Item $file.Name
-            7z a -tzip $file.Name $file.BaseName
-          }
 
       - name: Archive artifacts
         uses: actions/upload-artifact@v4
