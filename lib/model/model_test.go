@@ -9,6 +9,7 @@ package model
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -93,8 +94,10 @@ func TestRequest(t *testing.T) {
 
 	m.ScanFolder("default")
 
+	foobarHash := sha256.Sum256([]byte("foobar"))
+
 	// Existing, shared file
-	res, err := m.Request(device1Conn, &protocol.Request{Folder: "default", Name: "foo", Size: 6})
+	res, err := m.Request(device1Conn, &protocol.Request{Folder: "default", Name: "foo", Size: 6, Hash: foobarHash[:]})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,35 +107,42 @@ func TestRequest(t *testing.T) {
 	}
 
 	// Existing, nonshared file
-	_, err = m.Request(device2Conn, &protocol.Request{Folder: "default", Name: "foo", Size: 6})
+	_, err = m.Request(device2Conn, &protocol.Request{Folder: "default", Name: "foo", Size: 6, Hash: foobarHash[:]})
 	if err == nil {
 		t.Error("Unexpected nil error on insecure file read")
 	}
 
 	// Nonexistent file
-	_, err = m.Request(device1Conn, &protocol.Request{Folder: "default", Name: "nonexistent", Size: 6})
+	_, err = m.Request(device1Conn, &protocol.Request{Folder: "default", Name: "nonexistent", Size: 6, Hash: foobarHash[:]})
 	if err == nil {
 		t.Error("Unexpected nil error on insecure file read")
 	}
 
 	// Shared folder, but disallowed file name
-	_, err = m.Request(device1Conn, &protocol.Request{Folder: "default", Name: "../walk.go", Size: 6})
+	_, err = m.Request(device1Conn, &protocol.Request{Folder: "default", Name: "../walk.go", Size: 6, Hash: foobarHash[:]})
 	if err == nil {
 		t.Error("Unexpected nil error on insecure file read")
 	}
 
 	// Negative size
-	_, err = m.Request(device1Conn, &protocol.Request{Folder: "default", Name: "foo", Size: -4})
+	_, err = m.Request(device1Conn, &protocol.Request{Folder: "default", Name: "foo", Size: -4, Hash: foobarHash[:]})
 	if err == nil {
 		t.Error("Unexpected nil error on insecure file read")
 	}
 
-	// Larger block than available
+	// Missing hash
+	_, err = m.Request(device1Conn, &protocol.Request{Folder: "default", Name: "foo", Size: 6})
+	if err == nil {
+		t.Error("Unexpected nil error on request without hash")
+	}
+
+	// Larger block than available, with a mismatched hash
 	_, err = m.Request(device1Conn, &protocol.Request{Folder: "default", Name: "foo", Size: 42, Hash: []byte("hash necessary but not checked")})
 	if err == nil {
 		t.Error("Unexpected nil error on read past end of file")
 	}
-	_, err = m.Request(device1Conn, &protocol.Request{Folder: "default", Name: "foo", Size: 42})
+	// Larger block than available, with the matching hash of the short read
+	_, err = m.Request(device1Conn, &protocol.Request{Folder: "default", Name: "foo", Size: 42, Hash: foobarHash[:]})
 	if err != nil {
 		t.Error("Unexpected error when large read should be permitted")
 	}
@@ -1593,7 +1603,7 @@ func TestIgnores(t *testing.T) {
 		ID: "fresh", Path: "XXX",
 		FilesystemType: config.FilesystemTypeFake,
 	}
-	ignores := ignore.New(fcfg.Filesystem(), ignore.WithCache(m.cfg.Options().CacheIgnoredFiles))
+	ignores := ignore.New(fcfg.Filesystem())
 	m.mut.Lock()
 	m.folderCfgs[fcfg.ID] = fcfg
 	m.folderIgnores[fcfg.ID] = ignores
@@ -1608,7 +1618,7 @@ func TestIgnores(t *testing.T) {
 	pausedDefaultFolderConfig := defaultFolderConfig
 	pausedDefaultFolderConfig.Paused = true
 
-	m.restartFolder(defaultFolderConfig, pausedDefaultFolderConfig, false)
+	m.restartFolder(defaultFolderConfig, pausedDefaultFolderConfig)
 	// Here folder initialization is not an issue as a paused folder isn't
 	// added to the model and thus there is no initial scan happening.
 
@@ -1777,10 +1787,12 @@ func TestGlobalDirectoryTree(t *testing.T) {
 	b := func(isfile bool, path ...string) protocol.FileInfo {
 		typ := protocol.FileInfoTypeDirectory
 		var blocks []protocol.BlockInfo
+		var size int64
 
 		if isfile {
 			typ = protocol.FileInfoTypeFile
 			blocks = []protocol.BlockInfo{{Offset: 0x0, Size: 0xa, Hash: []uint8{0x2f, 0x72, 0xcc, 0x11, 0xa6, 0xfc, 0xd0, 0x27, 0x1e, 0xce, 0xf8, 0xc6, 0x10, 0x56, 0xee, 0x1e, 0xb1, 0x24, 0x3b, 0xe3, 0x80, 0x5b, 0xf9, 0xa9, 0xdf, 0x98, 0xf9, 0x2f, 0x76, 0x36, 0xb0, 0x5c}}}
+			size = 0xa
 		}
 		seq++
 		return protocol.FileInfo{
@@ -1788,7 +1800,7 @@ func TestGlobalDirectoryTree(t *testing.T) {
 			Type:      typ,
 			ModifiedS: 0x666,
 			Blocks:    blocks,
-			Size:      0xa,
+			Size:      size,
 			Sequence:  seq,
 		}
 	}
@@ -1804,7 +1816,7 @@ func TestGlobalDirectoryTree(t *testing.T) {
 		return &TreeEntry{
 			Name:     name,
 			ModTime:  time.Unix(0x666, 0),
-			Size:     128,
+			Size:     0,
 			Type:     protocol.FileInfoTypeDirectory.String(),
 			Children: entries,
 		}
@@ -2204,7 +2216,7 @@ func TestIndexesForUnknownDevicesDropped(t *testing.T) {
 		t.Error("expected two devices")
 	}
 
-	m.newFolder(defaultFolderConfig, false)
+	m.newFolder(defaultFolderConfig)
 	defer cleanupModel(m)
 
 	if devs, err := m.sdb.ListDevicesForFolder("default"); err != nil || len(devs) != 1 {
@@ -2979,15 +2991,16 @@ func TestRequestLimit(t *testing.T) {
 	defer cleanupModel(m)
 	m.ScanFolder("default")
 
+	emptyHash := sha256.Sum256(nil)
 	befReq := time.Now()
-	first, err := m.Request(conn, &protocol.Request{Folder: "default", Name: file, Size: 2000})
+	first, err := m.Request(conn, &protocol.Request{Folder: "default", Name: file, Size: 2000, Hash: emptyHash[:]})
 	if err != nil {
 		t.Fatalf("First request failed: %v", err)
 	}
 	reqDur := time.Since(befReq)
 	returned := make(chan struct{})
 	go func() {
-		second, err := m.Request(conn, &protocol.Request{Folder: "default", Name: file, Size: 2000})
+		second, err := m.Request(conn, &protocol.Request{Folder: "default", Name: file, Size: 2000, Hash: emptyHash[:]})
 		if err != nil {
 			t.Errorf("Second request failed: %v", err)
 		}
@@ -3257,17 +3270,20 @@ func TestRenameSequenceOrder(t *testing.T) {
 		t.Errorf("Unexpected count: %d != %d", count, numFiles)
 	}
 
-	// Modify all the files, other than the ones we expect to rename
+	// Modify all the files other than the rename sources, whose content we
+	// keep intact so the renamed copies still match by block hash.
 	for i := 0; i < numFiles; i++ {
-		if i == 3 || i == 17 || i == 16 || i == 4 {
+		if i == 3 || i == 16 {
 			continue
 		}
 		v := fmt.Sprintf("%d", i)
 		writeFile(t, ffs, v, []byte(v+"-new"))
 	}
-	// Rename
-	must(t, ffs.Rename("3", "17"))
-	must(t, ffs.Rename("16", "4"))
+	// Rename to previously unseen names. Renaming onto an existing name is
+	// treated as an in-place update rather than a rename, since rename
+	// detection only runs for files that are new on disk.
+	must(t, ffs.Rename("3", "20"))
+	must(t, ffs.Rename("16", "21"))
 
 	// Scan
 	m.ScanFolders()
@@ -3278,10 +3294,10 @@ func TestRenameSequenceOrder(t *testing.T) {
 	it, errFn := m.LocalFilesSequenced("default", protocol.LocalDeviceID, 0)
 	for i := range it {
 		t.Log(i)
-		if i.FileName() == "17" {
+		if i.FileName() == "20" {
 			firstExpectedSequence = i.SequenceNo() + 1
 		}
-		if i.FileName() == "4" {
+		if i.FileName() == "21" {
 			secondExpectedSequence = i.SequenceNo() + 1
 		}
 		if i.FileName() == "3" {

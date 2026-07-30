@@ -174,7 +174,7 @@ func (f *BasicFilesystem) MkdirAll(path string, perm FileMode) error {
 		return err
 	}
 
-	return f.mkdirAll(path, os.FileMode(perm))
+	return os.MkdirAll(path, os.FileMode(perm))
 }
 
 func (f *BasicFilesystem) Lstat(name string) (FileInfo, error) {
@@ -240,22 +240,23 @@ func (f *BasicFilesystem) DirNames(name string) ([]string, error) {
 	return names, nil
 }
 
+// Open opens the file for reading, while not following symlinks
 func (f *BasicFilesystem) Open(name string) (File, error) {
-	rootedName, err := f.rooted(name)
-	if err != nil {
-		return nil, err
-	}
-	fd, err := os.Open(rootedName)
-	if err != nil {
-		return nil, err
-	}
-	return basicFile{fd, name}, err
+	return f.OpenFile(name, os.O_RDONLY, 0)
 }
 
+// OpenFile is the generalised file open call, using the flags to determine
+// the open semantics. We always add O_NOFOLLOW, disallowing opening files
+// by following symlinks, unless OptFollow is set.
 func (f *BasicFilesystem) OpenFile(name string, flags int, mode FileMode) (File, error) {
 	rootedName, err := f.rooted(name)
 	if err != nil {
 		return nil, err
+	}
+	if flags&OptFollow != 0 {
+		flags &^= OptFollow // unset the synthetic OptFollow bit
+	} else {
+		flags |= optNoFollow
 	}
 	fd, err := os.OpenFile(rootedName, flags, os.FileMode(mode))
 	if err != nil {
@@ -264,16 +265,10 @@ func (f *BasicFilesystem) OpenFile(name string, flags int, mode FileMode) (File,
 	return basicFile{fd, name}, err
 }
 
+// Create opens a file for writing, creating it as required. The Create will
+// fail if the destination is a symlink.
 func (f *BasicFilesystem) Create(name string) (File, error) {
-	rootedName, err := f.rooted(name)
-	if err != nil {
-		return nil, err
-	}
-	fd, err := os.Create(rootedName)
-	if err != nil {
-		return nil, err
-	}
-	return basicFile{fd, name}, err
+	return f.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o666)
 }
 
 func (*BasicFilesystem) Walk(_ string, _ WalkFunc) error {

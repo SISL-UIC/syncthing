@@ -300,7 +300,7 @@ func (m *model) initFolders(cfg config.Configuration) error {
 			folderCfg.CreateRoot()
 			continue
 		}
-		err := m.newFolder(folderCfg, cfg.Options.CacheIgnoredFiles)
+		err := m.newFolder(folderCfg)
 		if err != nil {
 			return err
 		}
@@ -335,8 +335,8 @@ func (m *model) fatal(err error) {
 }
 
 // Need to hold lock on m.mut when calling this.
-func (m *model) addAndStartFolderLocked(cfg config.FolderConfiguration, cacheIgnoredFiles bool) {
-	ignores := ignore.New(cfg.Filesystem(), ignore.WithCache(cacheIgnoredFiles))
+func (m *model) addAndStartFolderLocked(cfg config.FolderConfiguration) {
+	ignores := ignore.New(cfg.Filesystem())
 	if cfg.Type != config.FolderTypeReceiveEncrypted {
 		if err := ignores.Load(".stignore"); err != nil && !fs.IsNotExist(err) {
 			slog.Error("Failed to load ignores", slogutil.Error(err))
@@ -371,7 +371,7 @@ func (m *model) addAndStartFolderLockedWithIgnores(cfg config.FolderConfiguratio
 	for _, available := range devs {
 		if _, ok := expected[available]; !ok {
 			l.Debugln("dropping", folder, "state for", available)
-			_ = m.sdb.DropAllFiles(folder, available)
+			_ = m.sdb.DropFolderDevice(folder, available)
 		}
 	}
 
@@ -509,7 +509,7 @@ func (m *model) cleanupFolderLocked(cfg config.FolderConfiguration) {
 	delete(m.folderEncryptionFailures, cfg.ID)
 }
 
-func (m *model) restartFolder(from, to config.FolderConfiguration, cacheIgnoredFiles bool) error {
+func (m *model) restartFolder(from, to config.FolderConfiguration) error {
 	if to.ID == "" {
 		panic("bug: cannot restart empty folder ID")
 	}
@@ -539,7 +539,7 @@ func (m *model) restartFolder(from, to config.FolderConfiguration, cacheIgnoredF
 
 	m.cleanupFolderLocked(from)
 	if !to.Paused {
-		m.addAndStartFolderLocked(to, cacheIgnoredFiles)
+		m.addAndStartFolderLocked(to)
 	}
 
 	runner, _ := m.folderRunners.Get(to.ID)
@@ -560,11 +560,11 @@ func (m *model) restartFolder(from, to config.FolderConfiguration, cacheIgnoredF
 	return nil
 }
 
-func (m *model) newFolder(cfg config.FolderConfiguration, cacheIgnoredFiles bool) error {
+func (m *model) newFolder(cfg config.FolderConfiguration) error {
 	m.mut.Lock()
 	defer m.mut.Unlock()
 
-	m.addAndStartFolderLocked(cfg, cacheIgnoredFiles)
+	m.addAndStartFolderLocked(cfg)
 
 	// Cluster configs might be received and processed before reaching this
 	// point, i.e. before the folder is started. If that's the case, start
@@ -1784,7 +1784,7 @@ func (m *model) handleAutoAccepts(deviceID protocol.DeviceID, folder protocol.Fo
 
 			// Attempt to create it to make sure it does, now.
 			fullPath := filepath.Join(defaultFolderCfg.Path, path)
-			if err := defaultPathFs.MkdirAll(path, 0o700); err != nil {
+			if err := defaultPathFs.MkdirAll(path, fs.ModePerm); err != nil {
 				slog.Error("Failed to create path for auto-accepted folder", folder.LogAttr(), slogutil.FilePath(fullPath), slogutil.Error(err))
 				continue
 			}
@@ -2079,7 +2079,7 @@ func (m *model) Request(conn protocol.Connection, req *protocol.Request) (out pr
 		return nil, protocol.ErrGeneric
 	}
 
-	if folderCfg.Type != config.FolderTypeReceiveEncrypted && len(req.Hash) > 0 && !scanner.Validate(res.data[:n], req.Hash) {
+	if folderCfg.Type != config.FolderTypeReceiveEncrypted && !scanner.Validate(res.data[:n], req.Hash) {
 		m.recheckFile(deviceID, req.Folder, req.Name, req.Offset, req.Hash)
 		l.Debugf("%v REQ(in) failed validating data: %s: %q / %q o=%d s=%d", m, deviceID.Short(), req.Folder, req.Name, req.Offset, req.Size)
 		return nil, protocol.ErrNoSuchFile
@@ -2548,13 +2548,6 @@ func (m *model) DelayScan(folder string, next time.Duration) {
 func (m *model) numHashers(folder string) int {
 	m.mut.RLock()
 	folderCfg := m.folderCfgs[folder]
-	numFolders := max(1, len(m.folderCfgs))
-	// MaxFolderConcurrency already limits the number of scanned folders, so
-	// prefer it over the overall number of folders to avoid limiting performance
-	// further for no reason.
-	if concurrency := m.cfg.Options().MaxFolderConcurrency(); concurrency > 0 {
-		numFolders = min(numFolders, concurrency)
-	}
 	m.mut.RUnlock()
 
 	if folderCfg.Hashers > 0 {
@@ -2562,21 +2555,15 @@ func (m *model) numHashers(folder string) int {
 		return folderCfg.Hashers
 	}
 
-	numCpus := runtime.GOMAXPROCS(-1)
-	if build.IsWindows || build.IsDarwin || build.IsIOS || build.IsAndroid {
-		// Interactive operating systems; don't load the system too heavily by
-		// default.
-		numCpus = max(1, numCpus/4)
+	numCPUs := runtime.GOMAXPROCS(-1)
+	switch {
+	case build.IsWindows || build.IsIOS || build.IsAndroid:
+		// Use a quarter of the CPU cores on interactive or constrained OSes
+		return max(1, numCPUs/4)
+	default:
+		// Otherwise use up to half
+		return max(1, numCPUs/2)
 	}
-
-	// For other operating systems and architectures, lets try to get some
-	// work done... Divide the available CPU cores among the configured
-	// folders.
-	if perFolder := numCpus / numFolders; perFolder > 0 {
-		return perFolder
-	}
-
-	return 1
 }
 
 // generateClusterConfig returns a ClusterConfigMessage that is correct and the
@@ -2985,7 +2972,7 @@ func (m *model) CommitConfiguration(from, to config.Configuration) bool {
 				slog.Info("Paused folder", cfg.LogAttr())
 			} else {
 				slog.Info("Adding folder", cfg.LogAttr())
-				if err := m.newFolder(cfg, to.Options.CacheIgnoredFiles); err != nil {
+				if err := m.newFolder(cfg); err != nil {
 					m.fatal(err)
 					return true
 				}
@@ -3011,8 +2998,8 @@ func (m *model) CommitConfiguration(from, to config.Configuration) bool {
 
 		// This folder exists on both sides. Settings might have changed.
 		// Check if anything differs that requires a restart.
-		if !reflect.DeepEqual(fromCfg.RequiresRestartOnly(), toCfg.RequiresRestartOnly()) || from.Options.CacheIgnoredFiles != to.Options.CacheIgnoredFiles {
-			if err := m.restartFolder(fromCfg, toCfg, to.Options.CacheIgnoredFiles); err != nil {
+		if !reflect.DeepEqual(fromCfg.RequiresRestartOnly(), toCfg.RequiresRestartOnly()) {
+			if err := m.restartFolder(fromCfg, toCfg); err != nil {
 				m.fatal(err)
 				return true
 			}

@@ -123,10 +123,12 @@ func TestRecvOnlyRevertNeeds(t *testing.T) {
 	oldData := []byte("hello\n")
 	knownFiles := setupKnownFiles(t, ffs, oldData)
 
-	// Send and index update for the known stuff
+	// Send an index update for the known stuff. Update the local index
+	// prior to getting index data from the remote device, so we avoid a
+	// pull starting and causing race flakiness for the rest of the test.
 
-	must(t, m.Index(conn, &protocol.Index{Folder: "ro", Files: knownFiles}))
 	f.updateLocalsFromScanning(knownFiles)
+	must(t, m.Index(conn, &protocol.Index{Folder: "ro", Files: knownFiles}))
 
 	// Scan the folder.
 
@@ -163,12 +165,11 @@ func TestRecvOnlyRevertNeeds(t *testing.T) {
 	// We now have a newer file than the rest of the cluster. Global state should reflect this.
 
 	size = mustV(m.GlobalSize("ro"))
-	const sizeOfDir = 128
-	if size.Files != 1 || size.Bytes != sizeOfDir+int64(len(oldData)) {
+	if size.Files != 1 || size.Bytes != int64(len(oldData)) {
 		t.Fatalf("Global: expected no change due to the new file: %+v", size)
 	}
 	size = mustV(m.LocalSize("ro", protocol.LocalDeviceID))
-	if size.Files != 1 || size.Bytes != sizeOfDir+int64(len(newData)) {
+	if size.Files != 1 || size.Bytes != int64(len(newData)) {
 		t.Fatalf("Local: expected the new file to be reflected: %+v", size)
 	}
 	size = mustV(m.NeedSize("ro", protocol.LocalDeviceID))
@@ -185,11 +186,11 @@ func TestRecvOnlyRevertNeeds(t *testing.T) {
 	m.Revert("ro")
 
 	size = mustV(m.GlobalSize("ro"))
-	if size.Files != 1 || size.Bytes != sizeOfDir+int64(len(oldData)) {
+	if size.Files != 1 || size.Bytes != int64(len(oldData)) {
 		t.Fatalf("Global: expected the global size to revert: %+v", size)
 	}
 	size = mustV(m.LocalSize("ro", protocol.LocalDeviceID))
-	if size.Files != 1 || size.Bytes != sizeOfDir+int64(len(newData)) {
+	if size.Files != 1 || size.Bytes != int64(len(newData)) {
 		t.Fatalf("Local: expected the local size to remain: %+v", size)
 	}
 	size = mustV(m.NeedSize("ro", protocol.LocalDeviceID))

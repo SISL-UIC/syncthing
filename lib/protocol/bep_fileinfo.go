@@ -146,6 +146,8 @@ type FileInfo struct {
 	Deleted       bool
 	NoPermissions bool
 
+	New bool // set by the scanner when the file newly appeared on disk; no db / wire representation
+
 	truncated bool // was created from a truncated file info without blocks
 }
 
@@ -233,7 +235,8 @@ func (f *FileInfo) LogAttr() slog.Attr {
 	case FileInfoTypeFile:
 		kind = "file"
 		if !f.Deleted {
-			attrs = append(attrs,
+			attrs = append(
+				attrs,
 				slog.Any("modified", f.ModTime()),
 				slog.String("permissions", fmt.Sprintf("0%03o", f.Permissions)),
 				slog.Int64("size", f.Size),
@@ -387,16 +390,6 @@ func (f FileInfo) IsSymlink() bool {
 
 func (f FileInfo) HasPermissionBits() bool {
 	return !f.NoPermissions
-}
-
-func (f FileInfo) FileSize() int64 {
-	if f.Deleted {
-		return 0
-	}
-	if f.IsDirectory() || f.IsSymlink() {
-		return SyntheticDirectorySize
-	}
-	return f.Size
 }
 
 func (f FileInfo) BlockSize() int {
